@@ -52,6 +52,8 @@ public:
 	~ComSerial();
 
 	eCommand chkMsg();
+
+private:
 	bool chkCRC(void);
 	void sendCRC(void);
 	void addCRC(uint8_t btVal);

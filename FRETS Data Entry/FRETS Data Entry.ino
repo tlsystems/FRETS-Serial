@@ -1,15 +1,23 @@
 //
-// First Robotics Evaluation & Tracking Systems
+// FRETS-Serial 
+//	First Robotics Evaluation & Tracking System
+//	Serial interface to host computer
 //
 //
 
 #define DEBUG
-#define DEBUG_DEBOUNCE
+//#define DEBUG_DEBOUNCE
+
+#include "ComSerial.h"
+
 
 // array of pin number for data entry buttons
-int pinButtons[] = { 9,8,7,6,5,4,3,2 };
+const int pinButtons[] = { 9,8,7,6,5,4,3,2 };
 // array of pin number for data entry board ID
-int pinID[] = { 12,11,10 };
+const int pinID[] = { 12,11,10 };
+
+const int pinBUZZER = A4;
+const int pinLED = A5;
 
 const int DEBOUNCE_TIME = 10;
 
@@ -31,6 +39,12 @@ sEvent  g_eventArray[1000];
 int		g_eventIndex;
 bool	g_bGameInProcess;
 
+ComSerial* g_pSerialPort;
+
+HardwareSerial* g_pDebugPort;
+HardwareSerial* g_pComPort;
+
+
 //**********************************************************************
 //  Initialize Hardware
 //
@@ -42,14 +56,25 @@ void setup()
 	for (int i = 0; i<3; i++)
 		pinMode(pinID[i], INPUT_PULLUP);
 
+	pinMode(pinLED, OUTPUT);
+	pinMode(pinBUZZER, OUTPUT);
+	digitalWrite(pinLED, HIGH);
+
 	// read board ID
 	g_btBoardID = digitalRead(pinID[0]) << 0 |
-				digitalRead(pinID[1]) << 1 |
-				digitalRead(pinID[2]) << 2;
+				  digitalRead(pinID[1]) << 1 |
+				  digitalRead(pinID[2]) << 2;
+
+	g_pSerialPort = new ComSerial(g_btBoardID);
+
+	g_pDebugPort = &Serial1;
+	g_pComPort = &Serial;
 
 	// enable serial port
-	Serial.begin(115200);
-	Serial.println("Hello World");
+	#if defined(DEBUG)
+	g_pDebugPort->begin(115200);
+	g_pDebugPort->println("Hello World");
+	#endif
 }
 
 //**********************************************************************
@@ -59,23 +84,15 @@ void loop()
 {
 	ProcessSerialCommands();
 
-	if (g_bGameInProcess)
+//	if (g_bGameInProcess)
 	{
 		ScanIO();			// read IO
 		DebounceButtons();	// debounce buttons
 
-		ProcessButtons();
+		DebugButtons();
+		//ProcessButtons();
 	}
 
-
-#if defined(debug)
-	Serial.print("0x");
-	if (btBTNS < 0x10)
-		Serial.print("0");
-	Serial.print(btBTNS, HEX);
-
-	delay(100);
-#endif
 
 }
 
@@ -100,6 +117,7 @@ void ScanIO(void)
 		g_btRawBTNS |= !digitalRead(pinButtons[i]) << i;
 	}
 }
+
 
 //********************************************************************
 // DebounceButtons
@@ -132,7 +150,7 @@ void DebounceButtons(void)
 	{
 		byte bitMask = 0x01 << i;
 		#if defined(DEBUG_DEBOUNCE)
-		Serial.print(bitMask, HEX);
+		g_pDebugPort->print(bitMask, HEX);
 		#endif
 
 		// check next bit's debounceTimer
@@ -141,8 +159,8 @@ void DebounceButtons(void)
 			// still active, update and continue
 			g_btDebounceTimer[i] -= deltaMillis;
 			#if defined(DEBUG_DEBOUNCE)
-			Serial.print(" debouncing ");
-			Serial.println(g_btDebounceTimer[i]);
+			g_pDebugPort->print(" debouncing ");
+			g_pDebugPort->println(g_btDebounceTimer[i]);
 			#endif
 			continue;
 		}
@@ -151,21 +169,21 @@ void DebounceButtons(void)
 			// debounce timed out
 			g_btDebounceTimer[i] = 0;
 			#if defined(DEBUG_DEBOUNCE)
-			Serial.print(" zero timer");
+			g_pDebugPort->print(" zero timer");
 			#endif
 			if (btChanged & bitMask)
 			{
 				if ((g_btRawBTNS & bitMask) == 0)
 				{
 					#if defined(DEBUG_DEBOUNCE)
-					Serial.print(" clear bit ");
+					g_pDebugPort->print(" clear bit ");
 					#endif
 					g_btBTNS &= ~bitMask;
 				}
 				else
 				{
 					#if defined(DEBUG_DEBOUNCE)
-					Serial.print(" set bit ");
+					g_pDebugPort->print(" set bit ");
 					#endif
 					g_btBTNS |= bitMask;
 				}
@@ -181,16 +199,50 @@ void DebounceButtons(void)
 	btLastRawBTNS = g_btBTNS;
 }
 
+void DebugButtons()
+{
+	static byte btLastBTNS = 0;
+	static byte btLastRAW = 0;
+	uint32_t curMillis = millis();
+
+	if (g_btBTNS != btLastBTNS)
+	{
+		g_pDebugPort->print("BTN ");
+		g_pDebugPort->print(g_btBTNS, HEX);
+		g_pDebugPort->print(" @ ");
+		g_pDebugPort->println(curMillis);
+	}
+
+	if (g_btRawBTNS != btLastRAW)
+	{
+		g_pDebugPort->print("RAW ");
+		g_pDebugPort->print(g_btRawBTNS, HEX);
+		g_pDebugPort->print(" @ ");
+		g_pDebugPort->println(curMillis);
+	}
+
+	btLastBTNS = g_btBTNS;
+	btLastRAW  = g_btRawBTNS;
+}
+
 //**********************************************************************
 //  Process button presses
 //
 void ProcessButtons()
 {
 	static byte btLastBTNS = 0;
-	byte btChanged = btLastBTNS;
+	byte btChanged = btLastBTNS ^ g_btBTNS;
+	uint32_t time = (millis() - g_matchStart)) / 10;
 
-	while (btChanged != 0)
+	byte bitMask = 0x01;
+	for (int i = 0; i < 8; i++)
 	{
+		if ((bitMask & btChanged) != 0)
+		{
+			g_eventArray[g_eventIndex].btnID = i;
+			g_eventArray[g_eventIndex].eventID = ((g_btBTNS & bitMask) != 0) ? 'P' : 'R';
+			g_eventArray[g_eventIndex].time = i;
+		}
 		
 	}
 	return;
@@ -201,31 +253,40 @@ void ProcessButtons()
 //
 void ProcessSerialCommands()
 {
-	if (Serial.peek() >= 0)
-	{
-
-	}
+	g_pSerialPort->chkMsg();
 }
 
 
 void printButtonData()
 {
-	Serial.print(" ID:");
-	Serial.print(g_btBoardID, HEX);
-	Serial.print(" 0:");
-	Serial.print(g_btBTNS & 0x01 ? 1 : 0);
-	Serial.print(" 1-");
-	Serial.print(g_btBTNS & 0x02 ? 1 : 0);
-	Serial.print(" 2-");
-	Serial.print(g_btBTNS & 0x04 ? 1 : 0);
-	Serial.print(" 3-");
-	Serial.print(g_btBTNS & 0x08 ? 1 : 0);
-	Serial.print(" 4-");
-	Serial.print(g_btBTNS & 0x10 ? 1 : 0);
-	Serial.print(" 5-");
-	Serial.print(g_btBTNS & 0x20 ? 1 : 0);
-	Serial.print(" 6-");
-	Serial.print(g_btBTNS & 0x40 ? 1 : 0);
-	Serial.print(" 7-");
-	Serial.println(g_btBTNS & 0x80 ? 1 : 0);
+	g_pDebugPort->print(" ID:");
+	g_pDebugPort->print(g_btBoardID, HEX);
+	g_pDebugPort->print(" 0:");
+	g_pDebugPort->print(g_btBTNS & 0x01 ? 1 : 0);
+	g_pDebugPort->print(" 1-");
+	g_pDebugPort->print(g_btBTNS & 0x02 ? 1 : 0);
+	g_pDebugPort->print(" 2-");
+	g_pDebugPort->print(g_btBTNS & 0x04 ? 1 : 0);
+	g_pDebugPort->print(" 3-");
+	g_pDebugPort->print(g_btBTNS & 0x08 ? 1 : 0);
+	g_pDebugPort->print(" 4-");
+	g_pDebugPort->print(g_btBTNS & 0x10 ? 1 : 0);
+	g_pDebugPort->print(" 5-");
+	g_pDebugPort->print(g_btBTNS & 0x20 ? 1 : 0);
+	g_pDebugPort->print(" 6-");
+	g_pDebugPort->print(g_btBTNS & 0x40 ? 1 : 0);
+	g_pDebugPort->print(" 7-");
+	g_pDebugPort->println(g_btBTNS & 0x80 ? 1 : 0);
+}
+
+void flashLED(int count)
+{
+	for (int i = 0; i < count; i++)
+	{
+		digitalWrite(pinLED, HIGH);
+		delay(50);
+		digitalWrite(pinLED, LOW);
+		delay(100);
+
+	}
 }
